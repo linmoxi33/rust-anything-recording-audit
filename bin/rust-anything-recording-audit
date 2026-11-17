@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""Audit a rust-anything cases.jsonl recording set before trusting its verdict.
+
+rust-anything decides "the Rust matches the original" over the cases that were recorded.
+This tool audits the recording itself: contradictions, duplicates, missing result arms,
+weak (constant/wildcard) assertions, and per-function input-surface coverage.
+Pure stdlib, fully offline.
+
+Exit codes: 0 = clean, 1 = findings (error/warn), 2 = usage or unreadable input.
+"""
+import argparse
+import json
+import sys
+from collections import OrderedDict
+
+TYPE_ORDER = ["null", "bool", "number", "string", "array", "object"]
+NUMERIC_EDGES = ("zero", "negative", "large")
+
+
+def jtype(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float)):
+        return "number"
+    if isinstance(v, str):
+        return "string"
+    if isinstance(v, list):
+        return "array"
+    return "object"
+
+
+def canon(v):
+    return json.dumps(v, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def scan_strings(v, out):
+    if isinstance(v, str):
+        out.append(v)
+    elif isinstance(v, list):
+        for x in v:
+            scan_strings(x, out)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            out.append(k)
+            scan_strings(x, out)
+
+
+def numeric_edges(v):
+    found = set()
+    if isinstance(v, bool):
+        return found
+    if isinstance(v, (int, float)):
+        if v == 0:
+            found.add("zero")
+        if v < 0:
+            found.add("negative")
+        try:
+            if abs(float(v)) >= 1e21:
+                found.add("large")
+        except (OverflowError, ValueError):
+            pass
+    elif isinstance(v, list):
+        for x in v:
+            found |= numeric_edges(x)
+    elif isinstance(v, dict):
+        for x in v.values():
+            found |= numeric_edges(x)
+    return found
+
+
+def is_wildcard(v):
+    if v == "...":
+        return True
+    if isinstance(v, str):
+        return any(line.strip() == "..." for line in v.splitlines())
+    return False
+
+
+class FnStats:
+    def __init__(self, name):
+        self.name = name
+        self.cases = 0
+        self.ok = 0
+        self.error = 0
+        self.types = set()
+        self.non_ascii = False
+        self.empty = False
+        self.numeric = set()
+        self.ok_values = []
+        self.wildcards = 0
+
+    def as_dict(self):
+        return OrderedDict(
+            cases=self.cases,
+            ok=self.ok,
+            error=self.error,
+            arg_types=[t for t in TYPE_ORDER if t in self.types],
+            non_ascii=self.non_ascii,
+            empty_input=self.empty,
+            numeric_edges=[e for e in NUMERIC_EDGES if e in self.numeric],
+            wildcard_cases=self.wildcards,
+        )
+
+
+def audit(records):
+    """records: list of (line_no, raw_text). Returns report dict + exit code."""
+    findings = []
+    stats = OrderedDict()
+    by_args = {}  # (fn, canon(args)) -> canon(result)
+    valid = 0
+    effective = 0
+    duplicates = 0
+
+    def add(code, severity, fn, line, detail):
+        findings.append(
+            OrderedDict(code=code, severity=severity, fn=fn, line=line, detail=detail)
+        )
+
+    for line_no, raw in records:
+        if not raw.strip():
+            continue
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            add("parse_error", "error", "", line_no, "invalid JSON: %s" % exc.msg)
+            continue
+        if not isinstance(rec, dict):
+            add("not_object", "error", "", line_no, "case is %s, expected object" % jtype(rec))
+            continue
+        fn = rec.get("fn")
+        if not isinstance(fn, str) or not fn:
+            add("missing_fn", "error", "", line_no, "case has no non-empty string 'fn'")
+            continue
+        valid += 1
+        st = stats.setdefault(fn, FnStats(fn))
+        st.cases += 1
+
+        has_ok = "ok" in rec
+        has_err = "error" in rec
+        if has_ok and has_err:
+            add("both_arms", "error", fn, line_no, "case declares both 'ok' and 'error'")
+        elif not has_ok and not has_err:
+            add("missing_result", "error", fn, line_no, "case has neither 'ok' nor 'error'")
+            continue
+
+        args = rec.get("args", [])
+        if not isinstance(args, list):
+            add("args_not_list", "error", fn, line_no, "'args' is %s, expected array" % jtype(args))
+            args = []
+
+        strings = []
+        scan_strings(args, strings)
+        if any(any(ord(ch) > 127 for ch in s) for s in strings):
+            st.non_ascii = True
+        if any(s == "" for s in strings) or any(
+            (isinstance(a, (list, dict)) and len(a) == 0) for a in args
+        ):
+            st.empty = True
+        st.numeric |= numeric_edges(args)
+        for a in args:
+            st.types.add(jtype(a))
+        if args and all(a is None for a in args):
+            add("null_only_args", "warn", fn, line_no, "every argument is null")
+
+        if has_err:
+            st.error += 1
+            result = ("error", canon(rec.get("error")))
+        else:
+            st.ok += 1
+            st.ok_values.append(rec.get("ok"))
+            if is_wildcard(rec.get("ok")):
+                st.wildcards += 1
+            result = ("ok", canon(rec.get("ok")))
+
+        key = (fn, canon(args))
+        if key in by_args:
+            if by_args[key] != result:
+                add(
+                    "contradictory_cases",
+                    "error",
+                    fn,
+                    line_no,
+                    "same args recorded with a different expected result",
+                )
+            else:
+                duplicates += 1
+        else:
+            by_args[key] = result
+            effective += 1
+
+    for fn, st in stats.items():
+        if st.ok and not st.error:
+            add("missing_error_cases", "warn", fn, 0, "%d ok cases, 0 error cases" % st.ok)
+        if st.error and not st.ok:
+            add("missing_ok_cases", "warn", fn, 0, "%d error cases, 0 ok cases" % st.error)
+        if st.ok >= 2 and len({canon(v) for v in st.ok_values}) == 1:
+            add("constant_output", "warn", fn, 0, "all %d ok results are identical" % st.ok)
+        if st.wildcards:
+            add(
+                "wildcard_assertion",
+                "warn",
+                fn,
+                0,
+                "%d ok cases accept '...' as the whole expected output" % st.wildcards,
+            )
+
+    errors = sum(1 for f in findings if f["severity"] == "error")
+    warns = sum(1 for f in findings if f["severity"] == "warn")
+    report = OrderedDict(
+        records=valid,
+        effective_cases=effective,
+        duplicate_cases=duplicates,
+        functions=len(stats),
+        findings=findings,
+        coverage=OrderedDict((fn, st.as_dict()) for fn, st in stats.items()),
+        summary=OrderedDict(error=errors, warn=warns, total=len(findings)),
+    )
+    code = 1 if (errors or warns) else 0
+    return report, code
+
+
+def render_text(report, path):
+    lines = ["rust-anything recording audit", "file: %s" % path]
+    pct = (100.0 * report["duplicate_cases"] / report["records"]) if report["records"] else 0.0
+    lines.append(
+        "records: %d  effective: %d  duplicates: %d (%.2f%%)  functions: %d"
+        % (
+            report["records"],
+            report["effective_cases"],
+            report["duplicate_cases"],
+            pct,
+            report["functions"],
+        )
+    )
+    s = report["summary"]
+    lines.append("findings: %d error, %d warn" % (s["error"], s["warn"]))
+    for f in report["findings"]:
+        where = ("line %d" % f["line"]) if f["line"] else f["fn"]
+        lines.append("  %-5s %-20s %-24s %s" % (f["severity"].upper(), f["code"], where, f["detail"]))
+    if report["coverage"]:
+        lines.append("coverage:")
+        for fn, c in report["coverage"].items():
+            missing = [t for t in TYPE_ORDER if t not in c["arg_types"]]
+            lines.append(
+                "  %s: cases=%d ok=%d error=%d types=%s missing_types=%s non_ascii=%s empty=%s numeric=%s"
+                % (
+                    fn,
+                    c["cases"],
+                    c["ok"],
+                    c["error"],
+                    ",".join(c["arg_types"]) or "-",
+                    ",".join(missing) or "-",
+                    c["non_ascii"],
+                    c["empty_input"],
+                    ",".join(c["numeric_edges"]) or "-",
+                )
+            )
+    lines.append("exit: %d" % (1 if (s["error"] or s["warn"]) else 0))
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="rust-anything-recording-audit",
+        description="Audit a rust-anything cases.jsonl recording before trusting a green diff.",
+    )
+    ap.add_argument("path", help="path to cases.jsonl")
+    ap.add_argument("--json", action="store_true", help="emit a single JSON object")
+    ap.add_argument(
+        "--min-cases",
+        type=int,
+        default=0,
+        metavar="N",
+        help="warn when a function has fewer than N recorded cases (default 0 = off)",
+    )
+    args = ap.parse_args(argv)
+    if args.min_cases < 0:
+        ap.error("--min-cases must be >= 0")
+
+    try:
+        with open(args.path, "r", encoding="utf-8", errors="strict") as fh:
+            raw_lines = fh.readlines()
+    except (OSError, UnicodeError) as exc:
+        sys.stderr.write("error: cannot read %s: %s\n" % (args.path, exc))
+        return 2
+
+    records = list(enumerate(raw_lines, 1))
+    report, code = audit(records)
+    if report["records"] == 0:
+        sys.stderr.write("error: no valid cases in %s\n" % args.path)
+        return 2
+
+    if args.min_cases:
+        thin = 0
+        for f in report["findings"]:
+            if f["code"] == "thin_recording":
+                thin += 1
+        for fn, c in report["coverage"].items():
+            if c["cases"] < args.min_cases:
+                report["findings"].append(
+                    OrderedDict(
+                        code="thin_recording",
+                        severity="warn",
+                        fn=fn,
+                        line=0,
+                        detail="%d cases < --min-cases %d" % (c["cases"], args.min_cases),
+                    )
+                )
+                thin += 1
+        report["summary"]["warn"] += thin
+        report["summary"]["total"] = len(report["findings"])
+        code = 1
+
+    if args.json:
+        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(render_text(report, args.path))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

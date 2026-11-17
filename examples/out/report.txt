@@ -1,0 +1,7 @@
+rust-anything recording audit
+file: examples/in/cases.jsonl
+records: 80  effective: 80  duplicates: 0 (0.00%)  functions: 1
+findings: 0 error, 0 warn
+coverage:
+  normalize: cases=80 ok=66 error=14 types=null,bool,string,array,object missing_types=number non_ascii=True empty=True numeric=-
+exit: 0

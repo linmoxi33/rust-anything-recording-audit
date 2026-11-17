@@ -1,0 +1,14 @@
+{"fn":"slugify","args":["Hello World"],"ok":"hello-world"}
+{"fn":"slugify","args":["Hello World"],"ok":"hello-world"}
+{"fn":"slugify","args":["A  B"],"ok":"a--b"}
+{"fn":"slugify","args":["A  B"],"ok":"a-b"}
+{"fn":"slugify","args":["x"],"ok":"x"}
+{"fn":"slugify","args":["y"],"ok":"y"}
+{"fn":"only_ok","args":[1],"ok":1}
+{"fn":"only_ok","args":[2],"ok":2}
+{"fn":"constant","args":["a"],"ok":"same"}
+{"fn":"constant","args":["b"],"ok":"same"}
+{"fn":"wild","args":["q"],"ok":"..."}
+{"fn":"broken","args":[1,2],"ok":1,"error":"boom"}
+{"fn":"nofn-result","args":[]}
+{"fn":"nameless"

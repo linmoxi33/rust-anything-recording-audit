@@ -1,0 +1,23 @@
+rust-anything recording audit
+file: examples/in/problem.jsonl
+records: 13  effective: 10  duplicates: 1 (7.69%)  functions: 6
+findings: 4 error, 7 warn
+  ERROR contradictory_cases  line 4                   same args recorded with a different expected result
+  ERROR both_arms            line 12                  case declares both 'ok' and 'error'
+  ERROR missing_result       line 13                  case has neither 'ok' nor 'error'
+  ERROR parse_error          line 14                  invalid JSON: Expecting ',' delimiter
+  WARN  missing_error_cases  slugify                  6 ok cases, 0 error cases
+  WARN  missing_error_cases  only_ok                  2 ok cases, 0 error cases
+  WARN  missing_error_cases  constant                 2 ok cases, 0 error cases
+  WARN  constant_output      constant                 all 2 ok results are identical
+  WARN  missing_error_cases  wild                     1 ok cases, 0 error cases
+  WARN  wildcard_assertion   wild                     1 ok cases accept '...' as the whole expected output
+  WARN  missing_ok_cases     broken                   1 error cases, 0 ok cases
+coverage:
+  slugify: cases=6 ok=6 error=0 types=string missing_types=null,bool,number,array,object non_ascii=False empty=False numeric=-
+  only_ok: cases=2 ok=2 error=0 types=number missing_types=null,bool,string,array,object non_ascii=False empty=False numeric=-
+  constant: cases=2 ok=2 error=0 types=string missing_types=null,bool,number,array,object non_ascii=False empty=False numeric=-
+  wild: cases=1 ok=1 error=0 types=string missing_types=null,bool,number,array,object non_ascii=False empty=False numeric=-
+  broken: cases=1 ok=0 error=1 types=number missing_types=null,bool,string,array,object non_ascii=False empty=False numeric=-
+  nofn-result: cases=1 ok=0 error=0 types=- missing_types=null,bool,number,string,array,object non_ascii=False empty=False numeric=-
+exit: 1

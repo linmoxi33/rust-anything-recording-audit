@@ -1,0 +1,30 @@
+{
+  "records": 80,
+  "effective_cases": 80,
+  "duplicate_cases": 0,
+  "functions": 1,
+  "findings": [],
+  "coverage": {
+    "normalize": {
+      "cases": 80,
+      "ok": 66,
+      "error": 14,
+      "arg_types": [
+        "null",
+        "bool",
+        "string",
+        "array",
+        "object"
+      ],
+      "non_ascii": true,
+      "empty_input": true,
+      "numeric_edges": [],
+      "wildcard_cases": 0
+    }
+  },
+  "summary": {
+    "error": 0,
+    "warn": 0,
+    "total": 0
+  }
+}
